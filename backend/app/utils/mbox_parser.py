@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mailbox
+import logging
 from dataclasses import dataclass, field
 from email.message import Message
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Iterator
 
 from app.utils.date_utils import parse_email_date
 from app.utils.email_utils import detect_auto_reply, detect_forwarded, normalize_subject, split_addresses
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -87,39 +90,56 @@ def _extract_bodies(message: Message) -> tuple[str | None, str | None, list[Pars
     return ('\n'.join(part for part in plain_parts if part) or None, '\n'.join(part for part in html_parts if part) or None, attachments)
 
 
+def count_mbox_messages(mbox_path: str | Path) -> int:
+    count = 0
+    with Path(mbox_path).open('rb') as handle:
+        for line in handle:
+            if line.startswith(b'From '):
+                count += 1
+    return count
+
+
 def iter_mbox_messages(mbox_path: str | Path) -> Iterator[ParsedEmail]:
     box = mailbox.mbox(str(mbox_path), create=False)
-    for message in box:
-        message_id = message.get('Message-ID') or message.get('Message-Id')
-        if not message_id:
-            continue
-        body_plain, body_html, attachments = _extract_bodies(message)
-        subject = message.get('Subject') or ''
-        raw_headers = {key: str(value) for key, value in message.items()}
-        labels = [label.strip() for label in (message.get('X-Gmail-Labels') or '').split(',') if label.strip()]
-        references = [item.strip() for item in (message.get('References') or '').split() if item.strip()]
-        sender = split_addresses(message.get('From'))
-        yield ParsedEmail(
-            message_id=message_id.strip(),
-            subject=subject,
-            subject_normalized=normalize_subject(subject),
-            sender=sender[0] if sender else (message.get('From') or '').strip().lower(),
-            recipients_to=split_addresses(message.get_all('To')),
-            recipients_cc=split_addresses(message.get_all('Cc')),
-            recipients_bcc=split_addresses(message.get_all('Bcc')),
-            body_plain=body_plain,
-            body_html=body_html,
-            sent_at=parse_email_date(message.get('Date')),
-            received_at=parse_email_date(message.get('Date')),
-            labels=labels,
-            raw_headers=raw_headers,
-            size_bytes=len(message.as_bytes()),
-            has_attachments=bool(attachments),
-            is_forwarded=detect_forwarded(subject, body_plain),
-            is_auto_reply=detect_auto_reply(subject, body_plain),
-            language='en',
-            thread_header_id=message.get('X-GM-THRID'),
-            in_reply_to=message.get('In-Reply-To'),
-            references=references,
-            attachments=attachments,
-        )
+    try:
+        for index, message in enumerate(box):
+            try:
+                message_id = message.get('Message-ID') or message.get('Message-Id')
+                if not message_id:
+                    continue
+                body_plain, body_html, attachments = _extract_bodies(message)
+                subject = message.get('Subject') or ''
+                raw_headers = {key: str(value) for key, value in message.items()}
+                labels = [label.strip() for label in (message.get('X-Gmail-Labels') or '').split(',') if label.strip()]
+                references = [item.strip() for item in (message.get('References') or '').split() if item.strip()]
+                sender = split_addresses(message.get('From'))
+                yield ParsedEmail(
+                    message_id=message_id.strip(),
+                    subject=subject,
+                    subject_normalized=normalize_subject(subject),
+                    sender=sender[0] if sender else (message.get('From') or '').strip().lower(),
+                    recipients_to=split_addresses(message.get_all('To')),
+                    recipients_cc=split_addresses(message.get_all('Cc')),
+                    recipients_bcc=split_addresses(message.get_all('Bcc')),
+                    body_plain=body_plain,
+                    body_html=body_html,
+                    sent_at=parse_email_date(message.get('Date')),
+                    received_at=parse_email_date(message.get('Date')),
+                    labels=labels,
+                    raw_headers=raw_headers,
+                    size_bytes=len(message.as_bytes()),
+                    has_attachments=bool(attachments),
+                    is_forwarded=detect_forwarded(subject, body_plain),
+                    is_auto_reply=detect_auto_reply(subject, body_plain),
+                    language='en',
+                    thread_header_id=message.get('X-GM-THRID'),
+                    in_reply_to=message.get('In-Reply-To'),
+                    references=references,
+                    attachments=attachments,
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning('Skipping malformed message at index %s from %s: %s', index, mbox_path, exc)
+            finally:
+                del message
+    finally:
+        box.close()

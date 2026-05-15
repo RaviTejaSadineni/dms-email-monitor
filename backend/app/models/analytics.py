@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, JSON, String, Text
+from sqlalchemy import BigInteger, ForeignKey, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base, TimestampMixin
@@ -25,7 +25,7 @@ class ImportJob(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
-    file_size_bytes: Mapped[int] = mapped_column(default=0, nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(50), default='pending', nullable=False)
     total_emails: Mapped[int] = mapped_column(default=0, nullable=False)
     processed_count: Mapped[int] = mapped_column(default=0, nullable=False)
