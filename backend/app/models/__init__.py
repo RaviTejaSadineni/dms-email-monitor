@@ -6,6 +6,7 @@ from app.models.contract import Contract, ContractStage, NegotiationClause
 from app.models.email import Email
 from app.models.thread import Thread
 from app.models.user import User
+from app.database import Base
 
 __all__ = [
     'AIInsight',
