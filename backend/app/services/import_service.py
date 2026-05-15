@@ -303,6 +303,8 @@ async def process_import_job(job_id: int, mbox_path: str, batch_size: int) -> No
             batch_start = 0
             total_batches = max(1, ceil(job.total_emails / effective_batch_size)) if job.total_emails else 1
             batch_index = 0
+            use_savepoint = bool(session.bind and session.bind.dialect.name != 'sqlite')
+
             for parsed_email in iter_mbox_messages(mbox_path):
                 batch.append(parsed_email)
                 if len(batch) < effective_batch_size:
@@ -313,7 +315,10 @@ async def process_import_job(job_id: int, mbox_path: str, batch_size: int) -> No
                 live_stats['current_batch_start'] = batch_start
                 _add_recent_event(live_stats, 'info', f'Processing batch {batch_index}/{total_batches}')
                 try:
-                    async with session.begin_nested():
+                    if use_savepoint:
+                        async with session.begin_nested():
+                            batch_stats = await _persist_batch(session, current_batch, job_id, settings.uploads_path, ai_service)
+                    else:
                         batch_stats = await _persist_batch(session, current_batch, job_id, settings.uploads_path, ai_service)
                     job.processed_count += len(current_batch)
                     live_stats['processed_count'] = job.processed_count
@@ -360,7 +365,10 @@ async def process_import_job(job_id: int, mbox_path: str, batch_size: int) -> No
                 live_stats['current_batch_start'] = batch_start
                 _add_recent_event(live_stats, 'info', f'Processing batch {batch_index}/{total_batches}')
                 try:
-                    async with session.begin_nested():
+                    if use_savepoint:
+                        async with session.begin_nested():
+                            batch_stats = await _persist_batch(session, batch, job_id, settings.uploads_path, ai_service)
+                    else:
                         batch_stats = await _persist_batch(session, batch, job_id, settings.uploads_path, ai_service)
                     job.processed_count += len(batch)
                     live_stats['processed_count'] = job.processed_count
