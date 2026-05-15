@@ -51,12 +51,59 @@ async def test_import_job_endpoint_runs(client, auth_headers, tmp_path):
     assert progress.json()['filename'] == 'sample-import.mbox'
 
 
+async def test_import_job_upload_endpoint_runs(client, auth_headers, tmp_path):
+    mbox_path = tmp_path / 'uploaded-import.mbox'
+    box = mailbox.mbox(mbox_path)
+    msg = EmailMessage()
+    msg['From'] = 'legal@company.com'
+    msg['To'] = 'sales@company.com'
+    msg['Subject'] = 'Upload import'
+    msg['Message-ID'] = '<upload-import@example.com>'
+    msg['Date'] = 'Thu, 14 May 2026 10:00:00 +0000'
+    msg.set_content('Please review uploaded mbox import.')
+    box.add(msg)
+    box.flush()
+
+    with mbox_path.open('rb') as uploaded_file:
+        response = await client.post(
+            '/api/import/upload',
+            headers=auth_headers,
+            files={'file': ('uploaded-import.mbox', uploaded_file, 'application/mbox')},
+            data={'batch_size': '100'},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['filename'] == 'uploaded-import.mbox'
+    assert payload['file_size_bytes'] > 0
+
+    progress = await client.get(f"/api/import/jobs/{payload['id']}/progress", headers=auth_headers)
+    assert progress.status_code == 200
+    assert progress.json()['filename'] == 'uploaded-import.mbox'
+
+
 async def test_import_job_rejects_non_mbox_files(client, auth_headers, tmp_path):
     invalid_path = tmp_path / 'sample.txt'
     invalid_path.write_text('not an mbox', encoding='utf-8')
     relative_invalid_path = invalid_path.relative_to(Path('/tmp')).as_posix()
 
     response = await client.post('/api/import/jobs', headers=auth_headers, json={'mbox_path': relative_invalid_path, 'batch_size': 100})
+
+    assert response.status_code == 400
+    assert response.json()['detail'] == 'only .mbox import files are supported'
+
+
+async def test_import_job_upload_rejects_non_mbox_files(client, auth_headers, tmp_path):
+    invalid_path = tmp_path / 'uploaded.txt'
+    invalid_path.write_text('not an mbox', encoding='utf-8')
+
+    with invalid_path.open('rb') as uploaded_file:
+        response = await client.post(
+            '/api/import/upload',
+            headers=auth_headers,
+            files={'file': ('uploaded.txt', uploaded_file, 'text/plain')},
+            data={'batch_size': '100'},
+        )
 
     assert response.status_code == 400
     assert response.json()['detail'] == 'only .mbox import files are supported'

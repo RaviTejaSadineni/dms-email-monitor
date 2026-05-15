@@ -6,6 +6,7 @@ import {
   CircularProgress,
   LinearProgress,
   Snackbar,
+  SvgIcon,
   Stack,
   Table,
   TableBody,
@@ -29,6 +30,14 @@ const STATUS_COLORS: Record<ImportJob['status'], 'default' | 'info' | 'warning' 
   failed: 'error',
 };
 
+function UploadIcon() {
+  return (
+    <SvgIcon fontSize="small">
+      <path d="M19 20H5v-2h14zm-7-4l-5-5h3V4h4v7h3z" />
+    </SvgIcon>
+  );
+}
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -42,8 +51,9 @@ function formatDateTime(iso: string | null): string {
 }
 
 export function ImportsPage() {
-  const [path, setPath] = useState('/data/takeout/legal-advisor.mbox');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [batchSize, setBatchSize] = useState(500);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   const [activeJob, setActiveJob] = useState<ImportJob | null>(null);
   const [jobHistory, setJobHistory] = useState<ImportJob[]>([]);
@@ -55,6 +65,7 @@ export function ImportsPage() {
     severity: 'success',
   });
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopPolling = useCallback(() => {
@@ -102,16 +113,26 @@ export function ImportsPage() {
   );
 
   useEffect(() => {
-    void refreshHistory().finally(() => setHistoryLoading(false));
+    const loadHistory = async () => {
+      await refreshHistory();
+      setHistoryLoading(false);
+    };
+    void loadHistory();
     return () => stopPolling();
   }, [refreshHistory, stopPolling]);
 
   const isRunning = activeJob !== null && (activeJob.status === 'queued' || activeJob.status === 'running');
+  const isUploading = submitting && uploadProgress < 100;
 
   const handleQueueImport = async () => {
+    if (!selectedFile) {
+      setSnackbar({ open: true, message: 'Please select an .mbox file first.', severity: 'error' });
+      return;
+    }
     setSubmitting(true);
+    setUploadProgress(0);
     try {
-      const job = await importsApi.createJob(path, batchSize);
+      const job = await importsApi.createJobFromUpload(selectedFile, batchSize, setUploadProgress);
       setActiveJob(job);
       startPolling(job.id);
     } catch (err) {
@@ -131,30 +152,71 @@ export function ImportsPage() {
       <SectionCard
         title="High-volume Gmail Takeout import"
         action={
-          <Button variant="contained" onClick={() => void handleQueueImport()} disabled={submitting || isRunning} startIcon={submitting ? <CircularProgress size={16} color="inherit" /> : undefined}>
-            {submitting ? 'Queuing…' : isRunning ? 'Running…' : 'Queue import'}
+          <Button
+            variant="contained"
+            onClick={() => void handleQueueImport()}
+            disabled={submitting || isRunning || !selectedFile}
+            startIcon={submitting ? <CircularProgress size={16} color="inherit" /> : <UploadIcon />}
+          >
+            {submitting ? 'Uploading…' : isRunning ? 'Processing…' : 'Queue import'}
           </Button>
         }
       >
         <Typography color="text.secondary">
           Streaming mbox parser, deduplication by message-id, attachment extraction, and AI-ready batch processing tuned for large 23GB imports.
         </Typography>
-        <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-          <TextField
-            fullWidth
-            label="mbox path"
-            value={path}
-            onChange={(event) => setPath(event.target.value)}
-            disabled={isRunning}
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ xs: 'stretch', md: 'center' }}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".mbox"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0] ?? null;
+              if (file && !file.name.toLowerCase().endsWith('.mbox')) {
+                setSnackbar({ open: true, message: 'Only .mbox files are supported.', severity: 'error' });
+                setSelectedFile(null);
+                event.target.value = '';
+                return;
+              }
+              setSelectedFile(file);
+              setUploadProgress(0);
+            }}
           />
+          <Button variant="outlined" disabled={submitting || isRunning} onClick={() => fileInputRef.current?.click()} startIcon={<UploadIcon />}>
+            Select .mbox file
+          </Button>
+          {selectedFile && (
+            <Typography color="text.secondary" variant="body2">
+              {selectedFile.name} · {formatBytes(selectedFile.size)} · {selectedFile.type || 'application/mbox'}
+            </Typography>
+          )}
           <TextField
             type="number"
             label="Batch size"
             value={batchSize}
             onChange={(event) => setBatchSize(Number(event.target.value))}
-            disabled={isRunning}
+            disabled={submitting || isRunning}
           />
         </Stack>
+
+        {(submitting || isRunning) && (
+          <Stack spacing={1.5}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center">
+              <Typography variant="subtitle2">{isUploading ? 'Uploading file…' : 'Processing emails…'}</Typography>
+              {isUploading && (
+                <Typography color="text.secondary" variant="body2">
+                  {uploadProgress}%
+                </Typography>
+              )}
+            </Stack>
+            <LinearProgress
+              variant={isUploading ? 'determinate' : 'indeterminate'}
+              value={isUploading ? uploadProgress : undefined}
+              sx={{ height: 10, borderRadius: 999 }}
+            />
+          </Stack>
+        )}
 
         {activeJob && (
           <Stack spacing={1.5}>
