@@ -58,6 +58,47 @@ async def create_import_job(
     background_tasks: BackgroundTasks,
 ) -> ImportJob:
     path = _resolve_import_path(mbox_path)
+    return await _create_import_job_from_path(
+        session,
+        user=user,
+        path=path,
+        batch_size=batch_size,
+        background_tasks=background_tasks,
+    )
+
+
+async def create_import_job_from_upload(
+    session: AsyncSession,
+    *,
+    user: User | None,
+    resolved_path: Path,
+    batch_size: int,
+    background_tasks: BackgroundTasks,
+) -> ImportJob:
+    path = resolved_path.expanduser().resolve()
+    if not path.is_absolute():
+        raise HTTPException(status_code=400, detail='uploaded file path must be absolute')
+    if path.suffix.lower() != '.mbox':
+        raise HTTPException(status_code=400, detail='only .mbox import files are supported')
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail='uploaded file not found')
+    return await _create_import_job_from_path(
+        session,
+        user=user,
+        path=path,
+        batch_size=batch_size,
+        background_tasks=background_tasks,
+    )
+
+
+async def _create_import_job_from_path(
+    session: AsyncSession,
+    *,
+    user: User | None,
+    path: Path,
+    batch_size: int,
+    background_tasks: BackgroundTasks,
+) -> ImportJob:
     job = ImportJob(
         user_id=user.id if user else None,
         filename=path.name,
