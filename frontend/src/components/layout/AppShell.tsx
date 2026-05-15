@@ -1,45 +1,87 @@
-import { Box, Button, Paper, Stack, Typography } from '@mui/material';
+import { AppBar, Box, Button, Divider, Drawer, List, ListItemButton, ListItemText, Stack, Toolbar, Typography } from '@mui/material';
 import type { PropsWithChildren } from 'react';
 
+const drawerWidth = 260;
+
 const items = [
-  { label: 'Overview', href: '#overview' },
-  { label: 'Lifecycle', href: '#lifecycle' },
-  { label: 'Emails', href: '#emails' },
-  { label: 'Contracts', href: '#contracts' },
-  { label: 'Imports', href: '#imports' },
-  { label: 'Insights', href: '#insights' },
-  { label: 'Theme', href: '#overview' },
+  { label: 'Dashboard', path: '/' },
+  { label: 'Emails', path: '/emails' },
+  { label: 'Contracts', path: '/contracts' },
+  { label: 'Import', path: '/imports' },
+  { label: 'AI Insights', path: '/insights' },
+  { label: 'Features', path: '/features' },
 ];
 
-export function AppShell({ children, mode, onToggleMode }: PropsWithChildren<{ mode: 'light' | 'dark'; onToggleMode: () => void }>) {
+type AppShellProps = PropsWithChildren<{
+  currentPath: string;
+  mode: 'light' | 'dark';
+  onLogout: () => void;
+  onNavigate: (path: string) => void;
+  onToggleMode: () => void;
+  userEmail?: string;
+  userName?: string;
+}>;
+
+export function AppShell({ children, currentPath, mode, onLogout, onNavigate, onToggleMode, userEmail, userName }: AppShellProps) {
   return (
-    <Box sx={{ minHeight: '100vh', background: (theme) => theme.palette.background.default }}>
-      <Box sx={{ px: { xs: 2, md: 4 }, py: 3 }}>
-        <Paper sx={{ p: 3, borderRadius: 5 }}>
-          <Stack spacing={2.5}>
-            <Stack direction={{ xs: 'column', lg: 'row' }} justifyContent="space-between" spacing={2}>
-              <div>
-                <Typography variant="h4">Legal Contract Intelligence Platform</Typography>
-                <Typography color="text.secondary" mt={1}>
-                  End-to-end contract lifecycle analytics for Gmail Takeout emails and attachments.
-                </Typography>
-              </div>
-              <Button color="primary" variant="contained" onClick={onToggleMode} sx={{ alignSelf: { xs: 'flex-start', lg: 'center' } }}>
-                Switch to {mode === 'light' ? 'dark' : 'light'} mode
+    <Box sx={{ minHeight: '100vh', background: (theme) => theme.palette.background.default, display: 'flex' }}>
+      <Drawer
+        variant="permanent"
+        sx={{
+          width: drawerWidth,
+          flexShrink: 0,
+          '& .MuiDrawer-paper': {
+            width: drawerWidth,
+            boxSizing: 'border-box',
+            borderRight: '1px solid',
+            borderColor: 'divider',
+          },
+        }}
+      >
+        <Toolbar>
+          <Stack spacing={0.5}>
+            <Typography variant="h6">Legal Contract Intelligence Platform</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Contract lifecycle analytics
+            </Typography>
+          </Stack>
+        </Toolbar>
+        <Divider />
+        <List sx={{ px: 1.5, py: 2 }}>
+          {items.map((item) => (
+            <ListItemButton
+              key={item.path}
+              selected={currentPath === item.path}
+              onClick={() => onNavigate(item.path)}
+              sx={{ borderRadius: 3, mb: 0.5 }}
+            >
+              <ListItemText primary={item.label} />
+            </ListItemButton>
+          ))}
+        </List>
+      </Drawer>
+      <Box sx={{ flexGrow: 1 }}>
+        <AppBar position="sticky" color="inherit" elevation={0} sx={{ borderBottom: '1px solid', borderColor: 'divider' }}>
+          <Toolbar sx={{ justifyContent: 'space-between', gap: 2 }}>
+            <div>
+              <Typography variant="h6">End-to-end contract monitoring</Typography>
+              <Typography color="text.secondary" variant="body2">
+                Signed in as {userName || 'User'}{userEmail ? ` • ${userEmail}` : ''}
+              </Typography>
+            </div>
+            <Stack direction="row" spacing={1.5}>
+              <Button color="primary" variant="outlined" onClick={onToggleMode}>
+                {mode === 'light' ? 'Dark mode' : 'Light mode'}
+              </Button>
+              <Button color="primary" variant="contained" onClick={onLogout}>
+                Logout
               </Button>
             </Stack>
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.25} flexWrap="wrap">
-              {items.map((item) => (
-                <Button key={item.label} component="a" href={item.href} variant="outlined" sx={{ borderRadius: 999 }}>
-                  {item.label}
-                </Button>
-              ))}
-            </Stack>
-          </Stack>
-        </Paper>
-      </Box>
-      <Box component="main" sx={{ px: { xs: 2, md: 4 }, pb: 4 }}>
-        {children}
+          </Toolbar>
+        </AppBar>
+        <Box component="main" sx={{ p: { xs: 2, md: 4 } }}>
+          {children}
+        </Box>
       </Box>
     </Box>
   );

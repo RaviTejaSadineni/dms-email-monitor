@@ -23,10 +23,10 @@ async function withFallback<T>(factory: () => Promise<T>, fallback: T): Promise<
 }
 
 export const dashboardApi = {
-  summary: (token?: string) => withFallback(() => getJson<SummaryResponse>('/analytics/summary', token), demoSummary),
-  insights: (token?: string) => withFallback(() => getJson<{ items: typeof demoInsights }>('/ai-insights/overview', token), { items: demoInsights }),
-  emails: (token?: string) => withFallback(() => getJson<{ items: typeof demoEmails; pagination: { total: number; page: number; page_size: number } }>('/emails', token), { items: demoEmails, pagination: { total: demoEmails.length, page: 1, page_size: demoEmails.length } }),
-  contracts: (token?: string) => withFallback(() => getJson<{ items: typeof demoContracts; pagination: { total: number; page: number; page_size: number } }>('/contracts', token), { items: demoContracts, pagination: { total: demoContracts.length, page: 1, page_size: demoContracts.length } }),
-  attachments: (token?: string) => withFallback(() => getJson<{ items: typeof demoAttachments }>('/attachments', token), { items: demoAttachments }),
+  summary: () => withFallback(() => getJson<SummaryResponse>('/analytics/summary'), demoSummary),
+  insights: () => withFallback(() => getJson<{ items: typeof demoInsights }>('/ai-insights/overview'), { items: demoInsights }),
+  emails: () => withFallback(() => getJson<{ items: typeof demoEmails; pagination: { total: number; page: number; page_size: number } }>('/emails'), { items: demoEmails, pagination: { total: demoEmails.length, page: 1, page_size: demoEmails.length } }),
+  contracts: () => withFallback(() => getJson<{ items: typeof demoContracts; pagination: { total: number; page: number; page_size: number } }>('/contracts'), { items: demoContracts, pagination: { total: demoContracts.length, page: 1, page_size: demoContracts.length } }),
+  attachments: () => withFallback(() => getJson<{ items: typeof demoAttachments }>('/attachments'), { items: demoAttachments }),
   features: async () => demoFeatures,
 };

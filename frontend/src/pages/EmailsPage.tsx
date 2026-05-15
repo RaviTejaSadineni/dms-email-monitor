@@ -6,10 +6,9 @@ import { useDashboardData } from '../hooks/useDashboardData';
 export function EmailsPage() {
   const { emails } = useDashboardData();
   const [query, setQuery] = useState('');
-  const rows = emails.data?.items ?? [];
   const filtered = useMemo(
-    () => rows.filter((item) => `${item.subject} ${item.sender} ${item.category}`.toLowerCase().includes(query.toLowerCase())),
-    [rows, query],
+    () => (emails.data?.items ?? []).filter((item) => `${item.subject} ${item.sender} ${item.category}`.toLowerCase().includes(query.toLowerCase())),
+    [emails.data?.items, query],
   );
 
   return (
