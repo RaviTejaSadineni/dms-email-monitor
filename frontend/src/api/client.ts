@@ -8,6 +8,11 @@ type RequestOptions = {
   auth?: boolean;
 };
 
+type FormDataRequestOptions = {
+  auth?: boolean;
+  onUploadProgress?: (percent: number) => void;
+};
+
 async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, auth = true } = options;
   const token = auth ? getStoredAuthToken() : null;
@@ -39,6 +44,46 @@ export function getJson<T>(path: string, options?: Omit<RequestOptions, 'method'
 
 export function postJson<T>(path: string, body: unknown, options?: Omit<RequestOptions, 'method' | 'body'>): Promise<T> {
   return requestJson<T>(path, { ...options, method: 'POST', body });
+}
+
+export function postFormData<T>(path: string, formData: FormData, options: FormDataRequestOptions = {}): Promise<T> {
+  const { auth = true, onUploadProgress } = options;
+  const token = auth ? getStoredAuthToken() : null;
+
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE}${path}`);
+    if (token) {
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    }
+
+    xhr.upload.onprogress = (event) => {
+      if (!onUploadProgress || !event.lengthComputable) return;
+      onUploadProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+    };
+
+    xhr.onload = () => {
+      if (xhr.status === 401) {
+        clearStoredAuthToken();
+        window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT));
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText) as T);
+        return;
+      }
+
+      try {
+        const payload = JSON.parse(xhr.responseText) as { detail?: string };
+        reject(new Error(payload.detail ?? `Request failed with status ${xhr.status}`));
+      } catch {
+        reject(new Error(`Request failed with status ${xhr.status}`));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('Network error'));
+    xhr.send(formData);
+  });
 }
 
 export { API_BASE };

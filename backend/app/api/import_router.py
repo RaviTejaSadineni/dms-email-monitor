@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import get_db
 from app.models.analytics import ImportJob
 from app.schemas.analytics import ImportJobCreate, ImportJobRead
 from app.services.auth_service import get_current_user
-from app.services.import_service import create_import_job
+from app.services.import_service import create_import_job, create_import_job_from_upload
 
 router = APIRouter(prefix='/import', tags=['import'])
 
@@ -34,6 +38,42 @@ async def create_job(
         user=current_user,
         mbox_path=payload.mbox_path,
         batch_size=payload.batch_size,
+        background_tasks=background_tasks,
+    )
+    return ImportJobRead.model_validate(job)
+
+
+@router.post('/upload', response_model=ImportJobRead)
+async def create_job_from_upload(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    batch_size: int = Form(500),
+    session: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> ImportJobRead:
+    original_name = Path(file.filename or '').name
+    if not original_name:
+        raise HTTPException(status_code=400, detail='file name is required')
+    if Path(original_name).suffix.lower() != '.mbox':
+        raise HTTPException(status_code=400, detail='only .mbox import files are supported')
+
+    imports_root = (get_settings().uploads_path.parent / 'imports').resolve()
+    upload_dir = imports_root / str(uuid4())
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = upload_dir / original_name
+
+    try:
+        with saved_path.open('wb') as output:
+            while chunk := await file.read(1024 * 1024):
+                output.write(chunk)
+    finally:
+        await file.close()
+
+    job = await create_import_job_from_upload(
+        session,
+        user=current_user,
+        resolved_path=saved_path,
+        batch_size=batch_size,
         background_tasks=background_tasks,
     )
     return ImportJobRead.model_validate(job)
