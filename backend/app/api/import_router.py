@@ -66,6 +66,9 @@ async def create_job_from_upload(
         with saved_path.open('wb') as output:
             while chunk := await file.read(1024 * 1024):
                 output.write(chunk)
+    except OSError as exc:
+        saved_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail='failed to save uploaded file') from exc
     finally:
         await file.close()
 

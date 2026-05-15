@@ -75,7 +75,7 @@ async def create_import_job_from_upload(
     batch_size: int,
     background_tasks: BackgroundTasks,
 ) -> ImportJob:
-    path = resolved_path.expanduser().resolve()
+    path = resolved_path.resolve()
     if not path.is_absolute():
         raise HTTPException(status_code=400, detail='uploaded file path must be absolute')
     if path.suffix.lower() != '.mbox':
