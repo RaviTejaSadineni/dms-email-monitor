@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from pathlib import Path, PurePath
 from typing import Iterable
 
@@ -20,9 +21,10 @@ from app.services.ai_service import get_ai_service
 from app.services.classification_service import classify_email
 from app.services.contract_service import STAGE_MAP, upsert_contract
 from app.services.thread_service import get_or_create_thread
-from app.utils.mbox_parser import ParsedEmail, iter_mbox_messages
+from app.utils.mbox_parser import ParsedEmail, count_mbox_messages, iter_mbox_messages
 
 QUEUE_NAME = 'dms:import:jobs'
+logger = logging.getLogger(__name__)
 
 
 def _thread_key(email: ParsedEmail) -> str:
@@ -121,28 +123,72 @@ async def _create_import_job_from_path(
 async def process_import_job(job_id: int, mbox_path: str, batch_size: int) -> None:
     settings = get_settings()
     ai_service = get_ai_service()
+    effective_batch_size = max(batch_size, 1)
     async with AsyncSessionLocal() as session:
         job = await session.get(ImportJob, job_id)
         if job is None:
             return
-        job.status = 'running'
-        job.started_at = datetime.now(timezone.utc).isoformat()
-        emails = list(iter_mbox_messages(mbox_path))
-        job.total_emails = len(emails)
-        await session.commit()
-        await publish_json(
-            f'import-job:{job.id}',
-            {'status': job.status, 'processed_count': job.processed_count, 'total_emails': job.total_emails},
-        )
+        try:
+            job.status = 'running'
+            job.started_at = datetime.now(timezone.utc).isoformat()
+            job.total_emails = count_mbox_messages(mbox_path)
+            logger.info('Import job %s started, %s emails to process', job_id, job.total_emails)
+            await session.commit()
+            await publish_json(
+                f'import-job:{job.id}',
+                {'status': job.status, 'processed_count': job.processed_count, 'total_emails': job.total_emails},
+            )
 
-        for index in range(0, len(emails), max(batch_size, 1)):
-            batch = emails[index : index + max(batch_size, 1)]
-            try:
-                await _persist_batch(session, batch, job_id, settings.uploads_path, ai_service)
-                job.processed_count += len(batch)
-            except Exception as exc:  # pragma: no cover
-                job.error_count += len(batch)
-                job.errors.append({'batch_start': index, 'error': str(exc)})
+            batch: list[ParsedEmail] = []
+            batch_start = 0
+            for parsed_email in iter_mbox_messages(mbox_path):
+                batch.append(parsed_email)
+                if len(batch) < effective_batch_size:
+                    continue
+                current_batch = batch
+                batch = []
+                try:
+                    await _persist_batch(session, current_batch, job_id, settings.uploads_path, ai_service)
+                    job.processed_count += len(current_batch)
+                    logger.info('Job %s: processed batch, %s/%s done', job_id, job.processed_count, job.total_emails)
+                except Exception as exc:  # pragma: no cover
+                    logger.error('Job %s: batch error: %s', job_id, exc)
+                    job.error_count += len(current_batch)
+                    job.errors = [*job.errors, {'batch_start': batch_start, 'error': str(exc)}]
+                await session.commit()
+                await publish_json(
+                    f'import-job:{job.id}',
+                    {
+                        'status': job.status,
+                        'processed_count': job.processed_count,
+                        'total_emails': job.total_emails,
+                        'error_count': job.error_count,
+                    },
+                )
+                batch_start += len(current_batch)
+
+            if batch:
+                try:
+                    await _persist_batch(session, batch, job_id, settings.uploads_path, ai_service)
+                    job.processed_count += len(batch)
+                    logger.info('Job %s: processed batch, %s/%s done', job_id, job.processed_count, job.total_emails)
+                except Exception as exc:  # pragma: no cover
+                    logger.error('Job %s: batch error: %s', job_id, exc)
+                    job.error_count += len(batch)
+                    job.errors = [*job.errors, {'batch_start': batch_start, 'error': str(exc)}]
+                await session.commit()
+                await publish_json(
+                    f'import-job:{job.id}',
+                    {
+                        'status': job.status,
+                        'processed_count': job.processed_count,
+                        'total_emails': job.total_emails,
+                        'error_count': job.error_count,
+                    },
+                )
+
+            job.status = 'completed' if job.error_count == 0 else 'completed_with_errors'
+            job.completed_at = datetime.now(timezone.utc).isoformat()
             await session.commit()
             await publish_json(
                 f'import-job:{job.id}',
@@ -151,22 +197,32 @@ async def process_import_job(job_id: int, mbox_path: str, batch_size: int) -> No
                     'processed_count': job.processed_count,
                     'total_emails': job.total_emails,
                     'error_count': job.error_count,
+                    'completed_at': job.completed_at,
                 },
             )
-
-        job.status = 'completed' if job.error_count == 0 else 'completed_with_errors'
-        job.completed_at = datetime.now(timezone.utc).isoformat()
-        await session.commit()
-        await publish_json(
-            f'import-job:{job.id}',
-            {
-                'status': job.status,
-                'processed_count': job.processed_count,
-                'total_emails': job.total_emails,
-                'error_count': job.error_count,
-                'completed_at': job.completed_at,
-            },
-        )
+            logger.info('Job %s completed', job_id)
+        except Exception as exc:  # pragma: no cover
+            logger.exception('Job %s failed: %s', job_id, exc)
+            await session.rollback()
+            job = await session.get(ImportJob, job_id)
+            if job is None:
+                return
+            job.status = 'failed'
+            job.completed_at = datetime.now(timezone.utc).isoformat()
+            job.error_count += 1
+            job.errors = [*job.errors, {'batch_start': -1, 'error': str(exc)}]
+            await session.commit()
+            await publish_json(
+                f'import-job:{job.id}',
+                {
+                    'status': job.status,
+                    'processed_count': job.processed_count,
+                    'total_emails': job.total_emails,
+                    'error_count': job.error_count,
+                    'completed_at': job.completed_at,
+                    'errors': job.errors,
+                },
+            )
 
 
 async def _persist_batch(

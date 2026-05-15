@@ -98,7 +98,9 @@ export function ImportsPage() {
               message:
                 job.status === 'completed'
                   ? `Import completed: ${job.processed_count.toLocaleString()} emails processed.`
-                  : `Import finished with ${job.error_count} error(s).`,
+                  : job.status === 'failed'
+                    ? `Import failed: ${job.errors[0]?.error ?? 'Unexpected error'}`
+                    : `Import finished with ${job.error_count} error(s).`,
               severity: job.status === 'completed' ? 'success' : 'error',
             });
             void refreshHistory();
@@ -123,6 +125,7 @@ export function ImportsPage() {
 
   const isRunning = activeJob !== null && (activeJob.status === 'queued' || activeJob.status === 'running');
   const isUploading = submitting && uploadProgress < 100;
+  const isFailed = activeJob?.status === 'failed';
 
   const handleQueueImport = async () => {
     if (!selectedFile) {
@@ -236,7 +239,7 @@ export function ImportsPage() {
               sx={{ height: 10, borderRadius: 999 }}
             />
             {activeJob.error_count > 0 && (
-              <Alert severity="warning">
+              <Alert severity={activeJob.status === 'failed' ? 'error' : 'warning'}>
                 {activeJob.error_count} error(s) encountered.
                 {activeJob.errors.length > 0 && (
                   <Box component="ul" sx={{ m: 0, pl: 2 }}>
@@ -250,6 +253,16 @@ export function ImportsPage() {
             <Typography color="text.secondary" variant="body2">
               Default batch size 500-1000, async processing with Redis-backed progress caching.
             </Typography>
+            {isFailed && (
+              <Stack direction="row" spacing={1}>
+                <Button variant="outlined" onClick={() => void handleQueueImport()} disabled={submitting || !selectedFile}>
+                  Retry
+                </Button>
+                <Button variant="text" onClick={() => setActiveJob(null)}>
+                  Dismiss
+                </Button>
+              </Stack>
+            )}
           </Stack>
         )}
       </SectionCard>
