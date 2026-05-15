@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     app_name: str = 'DMS Email Monitor'
     debug: bool = False
     secret_key: str = 'changeme'
-    allowed_origins: list[str] = Field(default_factory=lambda: ['http://localhost:5173', 'http://localhost:3000'])
+    allowed_origins: list[str] = Field(default_factory=lambda: ['http://localhost:5173','http://localhost:5174', 'http://localhost:3000'])
     database_url: str = 'postgresql+asyncpg://postgres:app@localhost:5432/dms_email'
     redis_url: str = 'redis://localhost:6379/0'
     azure_openai_endpoint: str = 'https://gaebtesting1.openai.azure.com'
