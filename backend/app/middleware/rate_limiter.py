@@ -8,7 +8,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 
 class SimpleRateLimiterMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, requests_per_minute: int = 120):
+    def __init__(self, app, requests_per_minute: int = 300):
         super().__init__(app)
         self.requests_per_minute = requests_per_minute
         self.history: dict[str, deque[float]] = defaultdict(deque)
