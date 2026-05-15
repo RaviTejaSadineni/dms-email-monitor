@@ -9,3 +9,4 @@ frontend/node_modules/
 frontend/dist/
 uploads/
 .env
+backend/test_dms_email.db
