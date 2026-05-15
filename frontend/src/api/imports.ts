@@ -18,6 +18,31 @@ export interface ImportJob {
   completed_at: string | null;
 }
 
+export interface ImportJobLiveEvent {
+  type: 'info' | 'warning' | 'error' | 'success';
+  message: string;
+  timestamp: string;
+}
+
+export interface ImportJobLiveStats {
+  job_id: number;
+  status: ImportJob['status'];
+  total_emails: number;
+  processed_count: number;
+  error_count: number;
+  threads_created: number;
+  contracts_found: number;
+  attachments_extracted: number;
+  spam_filtered: number;
+  emails_per_second: number;
+  estimated_remaining_seconds: number | null;
+  current_batch_start: number;
+  category_distribution: Record<string, number>;
+  priority_distribution: Record<string, number>;
+  recent_events: ImportJobLiveEvent[];
+  current_email_subject: string | null;
+}
+
 export const importsApi = {
   createJob: (mboxPath: string, batchSize: number): Promise<ImportJob> =>
     postJson<ImportJob>('/import/jobs', { mbox_path: mboxPath, batch_size: batchSize }),
@@ -35,6 +60,9 @@ export const importsApi = {
 
   getJobProgress: (jobId: number): Promise<ImportJob> =>
     getJson<ImportJob>(`/import/jobs/${jobId}/progress`),
+
+  getJobLiveStats: (jobId: number): Promise<ImportJobLiveStats> =>
+    getJson<ImportJobLiveStats>(`/import/jobs/${jobId}/live-stats`),
 
   listJobs: (): Promise<ImportJob[]> =>
     getJson<ImportJob[]>('/import/jobs'),

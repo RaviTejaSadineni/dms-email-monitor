@@ -17,8 +17,9 @@ import {
   Typography,
 } from '@mui/material';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { importsApi, type ImportJob } from '../api/imports';
+import { importsApi, type ImportJob, type ImportJobLiveStats } from '../api/imports';
 import { SectionCard } from '../components/common/SectionCard';
+import { ImportVisualizer } from '../components/import/ImportVisualizer';
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -56,6 +57,7 @@ export function ImportsPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
 
   const [activeJob, setActiveJob] = useState<ImportJob | null>(null);
+  const [liveStats, setLiveStats] = useState<ImportJobLiveStats | null>(null);
   const [jobHistory, setJobHistory] = useState<ImportJob[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -89,8 +91,9 @@ export function ImportsPage() {
       stopPolling();
       pollRef.current = setInterval(async () => {
         try {
-          const job = await importsApi.getJobProgress(jobId);
+          const [job, stats] = await Promise.all([importsApi.getJobProgress(jobId), importsApi.getJobLiveStats(jobId)]);
           setActiveJob(job);
+          setLiveStats(stats);
           if (job.status === 'completed' || job.status === 'completed_with_errors' || job.status === 'failed') {
             stopPolling();
             setSnackbar({
@@ -137,6 +140,7 @@ export function ImportsPage() {
     try {
       const job = await importsApi.createJobFromUpload(selectedFile, batchSize, setUploadProgress);
       setActiveJob(job);
+      setLiveStats(null);
       startPolling(job.id);
     } catch (err) {
       setSnackbar({ open: true, message: err instanceof Error ? err.message : 'Failed to create import job', severity: 'error' });
@@ -262,6 +266,12 @@ export function ImportsPage() {
                   Dismiss
                 </Button>
               </Stack>
+            )}
+            {(activeJob.status === 'queued' || activeJob.status === 'running') && <ImportVisualizer job={activeJob} stats={liveStats} />}
+            {activeJob.status === 'completed' && (
+              <Alert severity="success" sx={{ bgcolor: 'rgba(102,187,106,0.16)' }}>
+                🎉 Import completed successfully. {activeJob.processed_count.toLocaleString()} emails processed.
+              </Alert>
             )}
           </Stack>
         )}

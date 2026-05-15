@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import logging
 from pathlib import Path, PurePath
+from math import ceil
 from typing import Iterable
 
 from fastapi import BackgroundTasks, HTTPException
@@ -16,7 +18,7 @@ from app.models.attachment import Attachment
 from app.models.classification import Classification
 from app.models.email import Email
 from app.models.user import User
-from app.redis_client import publish_json
+from app.redis_client import get_redis, publish_json
 from app.services.ai_service import get_ai_service
 from app.services.classification_service import classify_email
 from app.services.contract_service import STAGE_MAP, upsert_contract
@@ -25,6 +27,36 @@ from app.utils.mbox_parser import ParsedEmail, count_mbox_messages, iter_mbox_me
 
 QUEUE_NAME = 'dms:import:jobs'
 logger = logging.getLogger(__name__)
+LIVE_STATS_KEY_PREFIX = 'import-job-live'
+RECENT_EVENTS_LIMIT = 100
+BINARY_EXTENSIONS = {
+    '.pdf',
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.gif',
+    '.bmp',
+    '.webp',
+    '.doc',
+    '.docx',
+    '.ppt',
+    '.pptx',
+    '.xls',
+    '.xlsx',
+    '.zip',
+    '.7z',
+    '.rar',
+    '.gz',
+    '.tar',
+}
+BINARY_CONTENT_TYPE_PREFIXES = (
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument',
+    'application/zip',
+    'application/octet-stream',
+    'image/',
+)
 
 
 def _thread_key(email: ParsedEmail) -> str:
@@ -49,6 +81,106 @@ def _resolve_import_path(mbox_path: str) -> Path:
         if candidate.exists() and candidate.is_file():
             return candidate
     raise HTTPException(status_code=404, detail='mbox path not found')
+
+
+def _live_stats_key(job_id: int) -> str:
+    return f'{LIVE_STATS_KEY_PREFIX}:{job_id}'
+
+
+def _format_size(size_bytes: int) -> str:
+    if size_bytes <= 0:
+        return '0B'
+    units = ('B', 'KB', 'MB', 'GB', 'TB')
+    value = float(size_bytes)
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024
+        unit_index += 1
+    if unit_index == 0:
+        return f'{int(value)}{units[unit_index]}'
+    return f'{value:.1f}{units[unit_index]}'
+
+
+def _is_binary_attachment(filename: str, content_type: str | None) -> bool:
+    extension = Path(filename).suffix.lower()
+    if extension in BINARY_EXTENSIONS:
+        return True
+    normalized_content_type = (content_type or '').lower()
+    return normalized_content_type.startswith(BINARY_CONTENT_TYPE_PREFIXES)
+
+
+def _build_attachment_excerpt(filename: str, content_type: str | None, payload: bytes) -> str:
+    if not payload:
+        return ''
+    if _is_binary_attachment(filename, content_type):
+        return f'[Binary file: {filename}, {_format_size(len(payload))}]'
+    raw_excerpt = payload[:4000].decode('utf-8', errors='replace')
+    return raw_excerpt.replace('\x00', '')
+
+
+def _add_recent_event(live_stats: dict, event_type: str, message: str) -> None:
+    live_stats['recent_events'].append(
+        {'type': event_type, 'message': message, 'timestamp': datetime.now(timezone.utc).isoformat()}
+    )
+    if len(live_stats['recent_events']) > RECENT_EVENTS_LIMIT:
+        live_stats['recent_events'] = live_stats['recent_events'][-RECENT_EVENTS_LIMIT:]
+
+
+def _calculate_rate(processed_count: int, started_at: datetime) -> float:
+    elapsed_seconds = max((datetime.now(timezone.utc) - started_at).total_seconds(), 1.0)
+    return round(processed_count / elapsed_seconds, 2)
+
+
+def _estimated_remaining(total_emails: int, processed_count: int, emails_per_second: float) -> int | None:
+    if emails_per_second <= 0:
+        return None
+    remaining = max(total_emails - processed_count, 0)
+    return int(round(remaining / emails_per_second))
+
+
+async def _publish_live_stats(job_id: int, live_stats: dict) -> None:
+    redis = await get_redis()
+    await redis.set(_live_stats_key(job_id), json.dumps(live_stats, default=str))
+
+
+async def get_import_job_live_stats(job: ImportJob) -> dict:
+    redis = await get_redis()
+    cached = await redis.get(_live_stats_key(job.id))
+    if cached:
+        try:
+            payload = json.loads(cached)
+            payload['job_id'] = job.id
+            payload['status'] = job.status
+            payload['processed_count'] = job.processed_count
+            payload['total_emails'] = job.total_emails
+            payload['error_count'] = job.error_count
+            return payload
+        except Exception:  # pragma: no cover
+            pass
+    return {
+        'job_id': job.id,
+        'status': job.status,
+        'total_emails': job.total_emails,
+        'processed_count': job.processed_count,
+        'error_count': job.error_count,
+        'threads_created': 0,
+        'contracts_found': 0,
+        'attachments_extracted': 0,
+        'spam_filtered': 0,
+        'emails_per_second': 0.0,
+        'estimated_remaining_seconds': None,
+        'current_batch_start': 0,
+        'category_distribution': {
+            'Legal Review': 0,
+            'Finance Review': 0,
+            'Negotiation': 0,
+            'General': 0,
+            'Spam': 0,
+        },
+        'priority_distribution': {'P1': 0, 'P2': 0, 'P3': 0, 'P4': 0},
+        'recent_events': [],
+        'current_email_subject': None,
+    }
 
 
 async def create_import_job(
@@ -128,12 +260,40 @@ async def process_import_job(job_id: int, mbox_path: str, batch_size: int) -> No
         job = await session.get(ImportJob, job_id)
         if job is None:
             return
+        started_at = datetime.now(timezone.utc)
+        live_stats = {
+            'job_id': job_id,
+            'status': 'running',
+            'total_emails': 0,
+            'processed_count': 0,
+            'error_count': 0,
+            'threads_created': 0,
+            'contracts_found': 0,
+            'attachments_extracted': 0,
+            'spam_filtered': 0,
+            'emails_per_second': 0.0,
+            'estimated_remaining_seconds': None,
+            'current_batch_start': 0,
+            'category_distribution': {
+                'Legal Review': 0,
+                'Finance Review': 0,
+                'Negotiation': 0,
+                'General': 0,
+                'Spam': 0,
+            },
+            'priority_distribution': {'P1': 0, 'P2': 0, 'P3': 0, 'P4': 0},
+            'recent_events': [],
+            'current_email_subject': None,
+        }
         try:
             job.status = 'running'
-            job.started_at = datetime.now(timezone.utc).isoformat()
+            job.started_at = started_at.isoformat()
             job.total_emails = count_mbox_messages(mbox_path)
             logger.info('Import job %s started, %s emails to process', job_id, job.total_emails)
             await session.commit()
+            live_stats['total_emails'] = job.total_emails
+            _add_recent_event(live_stats, 'info', f'Import started for {job.filename}')
+            await _publish_live_stats(job.id, live_stats)
             await publish_json(
                 f'import-job:{job.id}',
                 {'status': job.status, 'processed_count': job.processed_count, 'total_emails': job.total_emails},
@@ -141,21 +301,54 @@ async def process_import_job(job_id: int, mbox_path: str, batch_size: int) -> No
 
             batch: list[ParsedEmail] = []
             batch_start = 0
+            total_batches = max(1, ceil(job.total_emails / effective_batch_size)) if job.total_emails else 1
+            batch_index = 0
+            use_savepoint = bool(session.bind and session.bind.dialect.name != 'sqlite')
+
             for parsed_email in iter_mbox_messages(mbox_path):
                 batch.append(parsed_email)
                 if len(batch) < effective_batch_size:
                     continue
                 current_batch = batch
                 batch = []
+                batch_index += 1
+                live_stats['current_batch_start'] = batch_start
+                _add_recent_event(live_stats, 'info', f'Processing batch {batch_index}/{total_batches}')
                 try:
-                    await _persist_batch(session, current_batch, job_id, settings.uploads_path, ai_service)
+                    if use_savepoint:
+                        async with session.begin_nested():
+                            batch_stats = await _persist_batch(session, current_batch, job_id, settings.uploads_path, ai_service)
+                    else:
+                        batch_stats = await _persist_batch(session, current_batch, job_id, settings.uploads_path, ai_service)
                     job.processed_count += len(current_batch)
+                    live_stats['processed_count'] = job.processed_count
+                    live_stats['threads_created'] += batch_stats['threads_created']
+                    live_stats['contracts_found'] += batch_stats['contracts_found']
+                    live_stats['attachments_extracted'] += batch_stats['attachments_extracted']
+                    live_stats['spam_filtered'] += batch_stats['spam_filtered']
+                    for category, count in batch_stats['category_distribution'].items():
+                        live_stats['category_distribution'][category] = live_stats['category_distribution'].get(category, 0) + count
+                    for priority, count in batch_stats['priority_distribution'].items():
+                        live_stats['priority_distribution'][priority] = live_stats['priority_distribution'].get(priority, 0) + count
+                    live_stats['current_email_subject'] = batch_stats['current_email_subject']
                     logger.info('Job %s: processed batch, %s/%s done', job_id, job.processed_count, job.total_emails)
                 except Exception as exc:  # pragma: no cover
                     logger.error('Job %s: batch error: %s', job_id, exc)
+                    await session.rollback()
+                    job = await session.get(ImportJob, job_id)
+                    if job is None:
+                        return
                     job.error_count += len(current_batch)
                     job.errors = [*job.errors, {'batch_start': batch_start, 'error': str(exc)}]
+                    _add_recent_event(live_stats, 'warning', f'⚠️ Batch error: skipped {len(current_batch)} emails')
                 await session.commit()
+                live_stats['error_count'] = job.error_count
+                live_stats['status'] = job.status
+                live_stats['emails_per_second'] = _calculate_rate(job.processed_count, started_at)
+                live_stats['estimated_remaining_seconds'] = _estimated_remaining(
+                    job.total_emails, job.processed_count, live_stats['emails_per_second']
+                )
+                await _publish_live_stats(job.id, live_stats)
                 await publish_json(
                     f'import-job:{job.id}',
                     {
@@ -168,15 +361,44 @@ async def process_import_job(job_id: int, mbox_path: str, batch_size: int) -> No
                 batch_start += len(current_batch)
 
             if batch:
+                batch_index += 1
+                live_stats['current_batch_start'] = batch_start
+                _add_recent_event(live_stats, 'info', f'Processing batch {batch_index}/{total_batches}')
                 try:
-                    await _persist_batch(session, batch, job_id, settings.uploads_path, ai_service)
+                    if use_savepoint:
+                        async with session.begin_nested():
+                            batch_stats = await _persist_batch(session, batch, job_id, settings.uploads_path, ai_service)
+                    else:
+                        batch_stats = await _persist_batch(session, batch, job_id, settings.uploads_path, ai_service)
                     job.processed_count += len(batch)
+                    live_stats['processed_count'] = job.processed_count
+                    live_stats['threads_created'] += batch_stats['threads_created']
+                    live_stats['contracts_found'] += batch_stats['contracts_found']
+                    live_stats['attachments_extracted'] += batch_stats['attachments_extracted']
+                    live_stats['spam_filtered'] += batch_stats['spam_filtered']
+                    for category, count in batch_stats['category_distribution'].items():
+                        live_stats['category_distribution'][category] = live_stats['category_distribution'].get(category, 0) + count
+                    for priority, count in batch_stats['priority_distribution'].items():
+                        live_stats['priority_distribution'][priority] = live_stats['priority_distribution'].get(priority, 0) + count
+                    live_stats['current_email_subject'] = batch_stats['current_email_subject']
                     logger.info('Job %s: processed batch, %s/%s done', job_id, job.processed_count, job.total_emails)
                 except Exception as exc:  # pragma: no cover
                     logger.error('Job %s: batch error: %s', job_id, exc)
+                    await session.rollback()
+                    job = await session.get(ImportJob, job_id)
+                    if job is None:
+                        return
                     job.error_count += len(batch)
                     job.errors = [*job.errors, {'batch_start': batch_start, 'error': str(exc)}]
+                    _add_recent_event(live_stats, 'warning', f'⚠️ Batch error: skipped {len(batch)} emails')
                 await session.commit()
+                live_stats['error_count'] = job.error_count
+                live_stats['status'] = job.status
+                live_stats['emails_per_second'] = _calculate_rate(job.processed_count, started_at)
+                live_stats['estimated_remaining_seconds'] = _estimated_remaining(
+                    job.total_emails, job.processed_count, live_stats['emails_per_second']
+                )
+                await _publish_live_stats(job.id, live_stats)
                 await publish_json(
                     f'import-job:{job.id}',
                     {
@@ -190,6 +412,17 @@ async def process_import_job(job_id: int, mbox_path: str, batch_size: int) -> No
             job.status = 'completed' if job.error_count == 0 else 'completed_with_errors'
             job.completed_at = datetime.now(timezone.utc).isoformat()
             await session.commit()
+            live_stats['status'] = job.status
+            live_stats['processed_count'] = job.processed_count
+            live_stats['error_count'] = job.error_count
+            live_stats['emails_per_second'] = _calculate_rate(job.processed_count, started_at)
+            live_stats['estimated_remaining_seconds'] = 0
+            _add_recent_event(
+                live_stats,
+                'success',
+                f'Import complete: {job.processed_count} processed with {job.error_count} errors',
+            )
+            await _publish_live_stats(job.id, live_stats)
             await publish_json(
                 f'import-job:{job.id}',
                 {
@@ -212,6 +445,11 @@ async def process_import_job(job_id: int, mbox_path: str, batch_size: int) -> No
             job.error_count += 1
             job.errors = [*job.errors, {'batch_start': -1, 'error': str(exc)}]
             await session.commit()
+            live_stats['status'] = job.status
+            live_stats['processed_count'] = job.processed_count
+            live_stats['error_count'] = job.error_count
+            _add_recent_event(live_stats, 'error', f'Import failed: {exc}')
+            await _publish_live_stats(job.id, live_stats)
             await publish_json(
                 f'import-job:{job.id}',
                 {
@@ -231,10 +469,27 @@ async def _persist_batch(
     job_id: int,
     uploads_root: Path,
     ai_service,
-) -> None:
+) -> dict:
     batch = list(batch)
     if not batch:
-        return
+        return {
+            'threads_created': 0,
+            'contracts_found': 0,
+            'attachments_extracted': 0,
+            'spam_filtered': 0,
+            'category_distribution': {},
+            'priority_distribution': {},
+            'current_email_subject': None,
+        }
+    stats = {
+        'threads_created': 0,
+        'contracts_found': 0,
+        'attachments_extracted': 0,
+        'spam_filtered': 0,
+        'category_distribution': {},
+        'priority_distribution': {},
+        'current_email_subject': None,
+    }
     message_ids = [email.message_id for email in batch]
     existing_ids = set(
         (
@@ -256,6 +511,8 @@ async def _persist_batch(
             stage=stage,
             priority=classification.priority,
         )
+        if thread.email_count == 0:
+            stats['threads_created'] += 1
         email = Email(
             message_id=parsed.message_id,
             thread=thread,
@@ -288,8 +545,20 @@ async def _persist_batch(
         session.add(email)
         await session.flush()
         thread.email_count += 1
+        stats['current_email_subject'] = parsed.subject[:120]
+        if classification.is_spam:
+            stats['spam_filtered'] += 1
+        category = classification.category or 'General'
+        stats['category_distribution'][category] = (
+            stats['category_distribution'].get(category, 0) + 1
+        )
+        if classification.priority:
+            stats['priority_distribution'][classification.priority] = (
+                stats['priority_distribution'].get(classification.priority, 0) + 1
+            )
         content = ' '.join(filter(None, [parsed.subject, parsed.body_plain, parsed.body_html]))
         await upsert_contract(session, thread, classification.contract_numbers, content, stage, participants)
+        stats['contracts_found'] += len(classification.contract_numbers)
         session.add(
             Classification(
                 email_id=email.id,
@@ -305,8 +574,9 @@ async def _persist_batch(
         for attachment in parsed.attachments:
             file_path = attachment_dir / attachment.filename
             file_path.write_bytes(attachment.payload)
-            excerpt = attachment.payload[:4000].decode('utf-8', errors='replace') if attachment.payload else ''
+            excerpt = _build_attachment_excerpt(attachment.filename, attachment.content_type, attachment.payload)
             analysis = await ai_service.analyze_attachment(attachment.filename, excerpt)
+            stats['attachments_extracted'] += 1
             session.add(
                 Attachment(
                     email_id=email.id,
@@ -318,3 +588,4 @@ async def _persist_batch(
                     ai_analysis=analysis,
                 )
             )
+    return stats
