@@ -40,6 +40,31 @@ class ImportJobRead(ORMModel):
     completed_at: str | None
 
 
+class ImportJobLiveEvent(BaseModel):
+    type: str
+    message: str
+    timestamp: str
+
+
+class ImportJobLiveStatsRead(BaseModel):
+    job_id: int
+    status: str
+    total_emails: int
+    processed_count: int
+    error_count: int
+    threads_created: int
+    contracts_found: int
+    attachments_extracted: int
+    spam_filtered: int
+    emails_per_second: float
+    estimated_remaining_seconds: int | None
+    current_batch_start: int
+    category_distribution: dict[str, int]
+    priority_distribution: dict[str, int]
+    recent_events: list[ImportJobLiveEvent]
+    current_email_subject: str | None = None
+
+
 class AIInsightRead(ORMModel):
     id: int
     entity_type: str

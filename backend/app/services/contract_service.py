@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.contract import Contract, ContractStage, NegotiationClause
@@ -40,7 +41,11 @@ async def upsert_contract(
 
     contract = None
     if contract_numbers:
-        result = await session.execute(select(Contract).where(Contract.contract_number == contract_numbers[0]))
+        result = await session.execute(
+            select(Contract)
+            .options(selectinload(Contract.stages), selectinload(Contract.clauses))
+            .where(Contract.contract_number == contract_numbers[0])
+        )
         contract = result.scalar_one_or_none()
 
     if contract is None:
@@ -51,6 +56,8 @@ async def upsert_contract(
             current_stage=stage_name,
             status='in_progress',
             ai_summary=f'Contract lifecycle started in {stage_name or "Review"} stage.',
+            stages=[],
+            clauses=[],
         )
         amount, currency = extract_amount(content)
         contract.value_amount = amount

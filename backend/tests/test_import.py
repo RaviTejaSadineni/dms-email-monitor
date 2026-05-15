@@ -202,3 +202,98 @@ async def test_process_import_job_marks_failed_on_unhandled_error(tmp_path, monk
         assert failed.error_count == 1
         assert failed.errors[-1]['batch_start'] == -1
         assert 'out of memory' in failed.errors[-1]['error']
+
+
+async def test_attachment_excerpt_binary_placeholder_and_null_strip():
+    binary_excerpt = import_service._build_attachment_excerpt('contract.pdf', 'application/pdf', b'\x00\x01binary')
+    assert binary_excerpt.startswith('[Binary file: contract.pdf')
+
+    text_excerpt = import_service._build_attachment_excerpt('notes.txt', 'text/plain', b'abc\x00def')
+    assert text_excerpt == 'abcdef'
+
+
+async def test_process_import_job_continues_after_batch_error(tmp_path, monkeypatch):
+    mbox_path = tmp_path / 'batch-failure.mbox'
+    box = mailbox.mbox(mbox_path)
+    for idx in range(2):
+        msg = EmailMessage()
+        msg['From'] = 'legal@company.com'
+        msg['To'] = 'sales@company.com'
+        msg['Subject'] = f'Email {idx}'
+        msg['Message-ID'] = f'<batch-{idx}@example.com>'
+        msg['Date'] = 'Thu, 14 May 2026 10:00:00 +0000'
+        msg.set_content('body')
+        box.add(msg)
+    box.flush()
+
+    async with AsyncSessionLocal() as session:
+        job = ImportJob(
+            user_id=None,
+            filename='batch-failure.mbox',
+            file_size_bytes=0,
+            status='queued',
+            total_emails=0,
+            processed_count=0,
+            error_count=0,
+            started_at=None,
+            completed_at=None,
+        )
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+        job_id = job.id
+
+    call_count = {'count': 0}
+
+    async def flaky_persist(*args, **kwargs):
+        call_count['count'] += 1
+        if call_count['count'] == 1:
+            raise ValueError('bad batch')
+        return {
+            'threads_created': 0,
+            'contracts_found': 0,
+            'attachments_extracted': 0,
+            'spam_filtered': 0,
+            'category_distribution': {},
+            'priority_distribution': {},
+            'current_email_subject': None,
+        }
+
+    monkeypatch.setattr(import_service, '_persist_batch', flaky_persist)
+
+    await import_service.process_import_job(job_id, str(mbox_path), 1)
+
+    async with AsyncSessionLocal() as session:
+        completed = await session.get(ImportJob, job_id)
+        assert completed is not None
+        assert completed.status == 'completed_with_errors'
+        assert completed.processed_count == 1
+        assert completed.error_count == 1
+        assert completed.errors[-1]['batch_start'] == 0
+
+
+async def test_import_job_live_stats_endpoint_returns_payload(client, auth_headers, tmp_path):
+    mbox_path = tmp_path / 'live-stats.mbox'
+    box = mailbox.mbox(mbox_path)
+    msg = EmailMessage()
+    msg['From'] = 'legal@company.com'
+    msg['To'] = 'sales@company.com'
+    msg['Subject'] = 'Live stats email'
+    msg['Message-ID'] = '<live-stats@example.com>'
+    msg['Date'] = 'Thu, 14 May 2026 10:00:00 +0000'
+    msg.set_content('body')
+    box.add(msg)
+    box.flush()
+
+    relative_mbox_path = mbox_path.relative_to(Path('/tmp')).as_posix()
+    response = await client.post('/api/import/jobs', headers=auth_headers, json={'mbox_path': relative_mbox_path, 'batch_size': 100})
+    assert response.status_code == 200
+    job_id = response.json()['id']
+
+    live = await client.get(f'/api/import/jobs/{job_id}/live-stats', headers=auth_headers)
+    assert live.status_code == 200
+    payload = live.json()
+    assert payload['job_id'] == job_id
+    assert 'category_distribution' in payload
+    assert 'priority_distribution' in payload
+    assert 'recent_events' in payload

@@ -10,9 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import get_db
 from app.models.analytics import ImportJob
-from app.schemas.analytics import ImportJobCreate, ImportJobRead
+from app.schemas.analytics import ImportJobCreate, ImportJobLiveStatsRead, ImportJobRead
 from app.services.auth_service import get_current_user
-from app.services.import_service import create_import_job, create_import_job_from_upload
+from app.services.import_service import create_import_job, create_import_job_from_upload, get_import_job_live_stats
 
 router = APIRouter(prefix='/import', tags=['import'])
 
@@ -85,4 +85,22 @@ async def create_job_from_upload(
 @router.get('/jobs/{job_id}/progress', response_model=ImportJobRead)
 async def get_job_progress(job_id: int, session: AsyncSession = Depends(get_db), current_user=Depends(get_current_user)) -> ImportJobRead:
     job = await session.get(ImportJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail='import job not found')
+    if job.user_id is not None and job.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='import job not found')
     return ImportJobRead.model_validate(job)
+
+
+@router.get('/jobs/{job_id}/live-stats', response_model=ImportJobLiveStatsRead)
+async def get_job_live_stats(
+    job_id: int,
+    session: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> ImportJobLiveStatsRead:
+    job = await session.get(ImportJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail='import job not found')
+    if job.user_id is not None and job.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='import job not found')
+    return ImportJobLiveStatsRead.model_validate(await get_import_job_live_stats(job))
